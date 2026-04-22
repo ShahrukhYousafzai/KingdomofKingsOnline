@@ -327,6 +327,52 @@
       document.addEventListener('gesturestart',  function(e) { e.preventDefault(); }, { passive: false });
       document.addEventListener('gesturechange', function(e) { e.preventDefault(); }, { passive: false });
 
+      // ── Solana WebSocket crash guard ─────────────────────────────────
+      // The Solana SDK's streaming RPC client crashes if it receives a malformed
+      // or unexpected JSON message from the Helius node (e.g. keepalive pings,
+      // error frames, or subscription confirmations in an unexpected format).
+      // This monkey-patch intercepts ALL WebSocket onmessage events and silently
+      // discards messages that aren't valid JSON before they reach the SDK's
+      // JToken.Parse() which throws an uncaught Il2CppExceptionWrapper.
+      (function patchWebSocket() {
+        var OrigWebSocket = window.WebSocket;
+        function PatchedWebSocket(url, protocols) {
+          var ws = protocols ? new OrigWebSocket(url, protocols) : new OrigWebSocket(url);
+          var originalOnMessage = null;
+          Object.defineProperty(ws, 'onmessage', {
+            get: function() { return originalOnMessage; },
+            set: function(handler) {
+              originalOnMessage = handler;
+              ws._patchedHandler = function(event) {
+                try {
+                  // Validate it is parseable JSON before forwarding to SDK
+                  if (typeof event.data === 'string') {
+                    JSON.parse(event.data); // Will throw if malformed
+                  }
+                  if (typeof originalOnMessage === 'function') {
+                    originalOnMessage(event);
+                  }
+                } catch(e) {
+                  console.warn('[WS Guard] Discarded malformed Solana WebSocket message. Raw:', 
+                    typeof event.data === 'string' ? event.data.substring(0, 200) : event.data);
+                }
+              };
+              // Replace the real event listener
+              ws.addEventListener('message', ws._patchedHandler);
+            },
+            configurable: true
+          });
+          return ws;
+        }
+        PatchedWebSocket.prototype = OrigWebSocket.prototype;
+        PatchedWebSocket.CONNECTING = OrigWebSocket.CONNECTING;
+        PatchedWebSocket.OPEN       = OrigWebSocket.OPEN;
+        PatchedWebSocket.CLOSING    = OrigWebSocket.CLOSING;
+        PatchedWebSocket.CLOSED     = OrigWebSocket.CLOSED;
+        window.WebSocket = PatchedWebSocket;
+        console.log('[WS Guard] Solana WebSocket crash guard installed.');
+      })();
+
       // ── AudioParam NaN/Infinity guard ─────────────────────────────────
       (function patchAudioParam() {
         var proto      = AudioParam.prototype;
